@@ -6,6 +6,9 @@ const generateId = () => Math.random().toString(36).substring(2, 9) + Date.now()
 interface AnnotationOverlayProps {
   pageNum: number;
   currentTool: AnnotationTool;
+  annotationColor: string;
+  strokeWidth: number;
+  strokeOpacity: number;
   annotations: Annotation[];
   onAddAnnotation: (ann: Annotation) => void;
   onUpdateAnnotation: (id: string, text: string) => void;
@@ -15,6 +18,9 @@ interface AnnotationOverlayProps {
 export function AnnotationOverlay({
   pageNum,
   currentTool,
+  annotationColor,
+  strokeWidth,
+  strokeOpacity,
   annotations,
   onAddAnnotation,
   onUpdateAnnotation,
@@ -35,9 +41,17 @@ export function AnnotationOverlay({
 
   const handlePointerDown = (e: React.PointerEvent) => {
     if (currentTool === "select") return;
-    
-    // Si la herramienta es nota, comprobamos si estamos haciendo clic en un textarea
+
     if ((e.target as HTMLElement).tagName.toLowerCase() === "textarea" || (e.target as HTMLElement).tagName.toLowerCase() === "button") {
+      return;
+    }
+
+    if (currentTool === "eraser") {
+      const target = e.target as HTMLElement;
+      const annId = target.dataset?.annotationId;
+      if (annId) {
+        onDeleteAnnotation(annId);
+      }
       return;
     }
 
@@ -49,6 +63,7 @@ export function AnnotationOverlay({
         id: generateId(),
         page: pageNum,
         type: "note",
+        color: annotationColor,
         data: { x, y, text: "" },
       });
       return;
@@ -60,7 +75,7 @@ export function AnnotationOverlay({
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
-    if (!isDrawing || currentTool === "select" || currentTool === "note") return;
+    if (!isDrawing || currentTool === "select" || currentTool === "note" || currentTool === "eraser") return;
     e.preventDefault();
     const { x, y } = getCoords(e);
     setCurrentPath((prev) => [...prev, { x, y }]);
@@ -76,8 +91,9 @@ export function AnnotationOverlay({
       onAddAnnotation({
         id: generateId(),
         page: pageNum,
-        type: currentTool,
-        data: { path: currentPath },
+        type: currentTool as "draw" | "highlight",
+        color: annotationColor,
+        data: { path: currentPath, width: strokeWidth, opacity: strokeOpacity },
       });
     }
     setCurrentPath([]);
@@ -91,56 +107,75 @@ export function AnnotationOverlay({
     return d;
   };
 
+  const isInteractive = currentTool !== "select" && currentTool !== "text_highlight";
+
+  const parseColor = (color: string, opacity: number) => {
+    if (color.startsWith("#")) {
+      const r = parseInt(color.slice(1, 3), 16);
+      const g = parseInt(color.slice(3, 5), 16);
+      const b = parseInt(color.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${opacity})`;
+    }
+    return color;
+  };
+
   return (
     <div
       ref={containerRef}
-      className={`absolute inset-0 z-30 touch-none ${currentTool !== "select" ? "cursor-crosshair" : "pointer-events-none"}`}
+      className={`absolute inset-0 z-30 touch-none ${isInteractive ? "" : "pointer-events-none"}`}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
-      style={{ pointerEvents: currentTool !== "select" ? "auto" : "none" }}
+      style={{ pointerEvents: isInteractive ? "auto" : "none" }}
     >
-      {/* SVG for paths */}
-      <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
+      <svg className={`absolute inset-0 w-full h-full ${currentTool === "eraser" ? "" : "pointer-events-none"}`} viewBox="0 0 100 100" preserveAspectRatio="none">
         {pageAnnotations.map((ann) => {
           if (ann.type === "draw" || ann.type === "highlight") {
             const isHighlight = ann.type === "highlight";
+            const color = ann.color || (isHighlight ? "#eab308" : "#8b5cf6");
+            const w = ann.data?.width || (isHighlight ? 6 : 2);
+            const op = ann.data?.opacity ?? (isHighlight ? 0.3 : 0.9);
+            const isFilled = ann.data?.fill === true;
             return (
               <path
                 key={ann.id}
+                data-annotation-id={ann.id}
                 d={renderPath(ann.data.path)}
-                fill="none"
-                stroke={isHighlight ? "rgba(45,212,191,0.4)" : "rgba(139,92,246,0.8)"}
-                strokeWidth={isHighlight ? "2.5" : "0.5"}
+                fill={isFilled ? parseColor(color, op) : "none"}
+                stroke={isFilled ? "none" : parseColor(color, op)}
+                strokeWidth={isFilled ? 0 : w}
                 strokeLinecap="round"
                 strokeLinejoin="round"
+                className={currentTool === "eraser" ? "cursor-pointer hover:opacity-50" : ""}
+                style={{ pointerEvents: currentTool === "eraser" ? "auto" : "none" }}
               />
             );
           }
           return null;
         })}
         
-        {/* Active path */}
         {isDrawing && currentPath.length > 0 && (
           <path
             d={renderPath(currentPath)}
             fill="none"
-            stroke={currentTool === "highlight" ? "rgba(45,212,191,0.4)" : "rgba(139,92,246,0.8)"}
-            strokeWidth={currentTool === "highlight" ? "2.5" : "0.5"}
+            stroke={parseColor(annotationColor, strokeOpacity)}
+            strokeWidth={strokeWidth}
             strokeLinecap="round"
             strokeLinejoin="round"
           />
         )}
       </svg>
 
-      {/* HTML elements for notes */}
       {pageAnnotations.map((ann) => {
         if (ann.type === "note") {
+          const noteColor = ann.color || "#3b82f6";
           return (
             <div
               key={ann.id}
-              className="absolute pointer-events-auto shadow-2xl z-40 animate-fade-in"
+              className={`absolute shadow-2xl z-40 animate-fade-in ${currentTool === "eraser" ? "cursor-pointer" : ""}`}
+              data-annotation-id={ann.id}
+              onClick={currentTool === "eraser" ? () => onDeleteAnnotation(ann.id) : undefined}
               style={{
                 left: `${ann.data.x}%`,
                 top: `${ann.data.y}%`,
@@ -149,11 +184,12 @@ export function AnnotationOverlay({
             >
               <div className="relative group">
                 <textarea
-                  className="w-48 h-24 p-2 text-xs bg-yellow-200/90 text-yellow-900 border border-yellow-400 rounded shadow-inner resize-none focus:outline-none focus:ring-2 focus:ring-yellow-500 placeholder:text-yellow-700/50"
+                  className="w-48 h-24 p-2 text-xs rounded shadow-inner resize-none focus:outline-none focus:ring-2 placeholder:text-white/50"
+                  style={{ backgroundColor: `${noteColor}dd`, borderColor: noteColor, color: "#fff" }}
                   placeholder="Escribe una nota..."
                   value={ann.data.text}
                   onChange={(e) => onUpdateAnnotation(ann.id, e.target.value)}
-                  onPointerDown={(e) => e.stopPropagation()} // Prevent drawing over textarea
+                  onPointerDown={(e) => e.stopPropagation()}
                 />
                 <button
                   onClick={(e) => { e.stopPropagation(); onDeleteAnnotation(ann.id); }}

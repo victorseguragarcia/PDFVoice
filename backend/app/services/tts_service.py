@@ -1,109 +1,164 @@
 import io
-import torch
-import torchaudio
 import logging
+import re
+import edge_tts
 
 logger = logging.getLogger(__name__)
 
+EDGE_VOICES_CONFIG = {
+    "es-ES-ElviraNeural": {
+        "gender": "Female",
+        "name": "Elvira (España)",
+        "lang": "es",
+        "locale": "es-ES"
+    },
+    "es-ES-AlvaroNeural": {
+        "gender": "Male",
+        "name": "Alvaro (España)",
+        "lang": "es",
+        "locale": "es-ES"
+    },
+    "es-MX-DaliaNeural": {
+        "gender": "Female",
+        "name": "Dalia (México)",
+        "lang": "es",
+        "locale": "es-MX"
+    },
+    "es-MX-JorgeNeural": {
+        "gender": "Male",
+        "name": "Jorge (México)",
+        "lang": "es",
+        "locale": "es-MX"
+    },
+    "es-AR-TomasNeural": {
+        "gender": "Male",
+        "name": "Tomás (Argentina)",
+        "lang": "es",
+        "locale": "es-AR"
+    },
+    "es-AR-ElenaNeural": {
+        "gender": "Female",
+        "name": "Elena (Argentina)",
+        "lang": "es",
+        "locale": "es-AR"
+    },
+    "en-US-AriaNeural": {
+        "gender": "Female",
+        "name": "Aria (US)",
+        "lang": "en",
+        "locale": "en-US"
+    },
+    "en-US-ChristopherNeural": {
+        "gender": "Male",
+        "name": "Christopher (US)",
+        "lang": "en",
+        "locale": "en-US"
+    },
+    "en-GB-SoniaNeural": {
+        "gender": "Female",
+        "name": "Sonia (UK)",
+        "lang": "en",
+        "locale": "en-GB"
+    },
+    "en-GB-RyanNeural": {
+        "gender": "Male",
+        "name": "Ryan (UK)",
+        "lang": "en",
+        "locale": "en-GB"
+    },
+    "fr-FR-DeniseNeural": {
+        "gender": "Female",
+        "name": "Denise (France)",
+        "lang": "fr",
+        "locale": "fr-FR"
+    },
+    "fr-FR-HenriNeural": {
+        "gender": "Male",
+        "name": "Henri (France)",
+        "lang": "fr",
+        "locale": "fr-FR"
+    },
+    "de-DE-KatjaNeural": {
+        "gender": "Female",
+        "name": "Katja (Germany)",
+        "lang": "de",
+        "locale": "de-DE"
+    },
+    "de-DE-ConradNeural": {
+        "gender": "Male",
+        "name": "Conrad (Germany)",
+        "lang": "de",
+        "locale": "de-DE"
+    }
+}
+
+def _build_voice_list():
+    voices = []
+    for short_name, cfg in EDGE_VOICES_CONFIG.items():
+        voices.append({
+            "short_name": short_name,
+            "friendly_name": f"Edge {cfg['name']}",
+            "locale": cfg['locale'],
+            "language": cfg['lang'],
+            "gender": cfg['gender'],
+        })
+    return voices
+
+ALL_VOICES = _build_voice_list()
+
 class TTSService:
-    """
-    Text-to-Speech service using local Silero TTS.
-    """
-    _instance = None
-    _model = None
-    _device = None
+    """Stateless TTS service using Microsoft Edge TTS (cloud)."""
 
-    @classmethod
-    def get_instance(cls):
-        if cls._instance is None:
-            cls._instance = TTSService()
-        return cls._instance
-
-    def __init__(self):
-        self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        logger.info(f"Loading Silero TTS model on {self._device}...")
-        try:
-            # Download/load model from torch hub
-            self._model, _ = torch.hub.load(
-                repo_or_dir='snakers4/silero-models',
-                model='silero_tts',
-                language='es',
-                speaker='v3_es'
-            )
-            self._model.to(self._device)
-            logger.info("Silero TTS model loaded successfully.")
-        except Exception as e:
-            logger.error(f"Failed to load Silero TTS model: {e}")
-            raise e
-
-    @classmethod
+    @staticmethod
     async def synthesize(
-        cls,
         text: str,
-        voice: str = "es_1",
+        voice: str = "es-ES-ElviraNeural",
         rate: str = "+0%",
         pitch: str = "+0Hz",
-    ) -> io.BytesIO:
-        """
-        Synthesize text into WAV audio using Silero TTS.
-        """
+    ):
         if not text or not text.strip():
             raise ValueError("El texto está vacío.")
 
-        instance = cls.get_instance()
-        if instance._model is None:
-            raise RuntimeError("El modelo TTS no está inicializado.")
+        # Fallback to default voice if not found
+        if voice not in EDGE_VOICES_CONFIG:
+            logger.warning("Voice '%s' not found, falling back to default", voice)
+            voice = "es-ES-ElviraNeural"
 
-        # Ensure valid voice fallback
-        if voice not in ["es_0", "es_1", "es_2"]:
-            voice = "es_1"
+        clean_text = text.strip().replace("\n", " ")
+        
+        # Split text into chunks if it exceeds the Edge TTS limit (~2000 chars)
+        chunks = []
+        if len(clean_text) <= 2000:
+            chunks = [clean_text]
+        else:
+            # Split by punctuation (.,!?) to avoid cutting mid-sentence
+            sentences = re.split(r'(?<=[.!?])\s+', clean_text)
+            current_chunk = ""
+            for sentence in sentences:
+                if len(current_chunk) + len(sentence) < 1900:
+                    current_chunk += sentence + " "
+                else:
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                    # If a single sentence is crazily long, forcefully truncate it
+                    if len(sentence) >= 1900:
+                        chunks.append(sentence[:1900])
+                        current_chunk = sentence[1900:] + " "
+                    else:
+                        current_chunk = sentence + " "
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
 
         try:
-            sample_rate = 24000
-            
-            # Replace some common markdown/PDF symbols that Silero might stumble on
-            clean_text = text.strip().replace("\n", " ")
-
-            # Apply Silero TTS
-            audio = instance._model.apply_tts(
-                text=clean_text,
-                speaker=voice,
-                sample_rate=sample_rate
-            )
-
-            # Convert to BytesIO
-            audio_io = io.BytesIO()
-            torchaudio.save(audio_io, audio.unsqueeze(0), sample_rate, format="wav")
-            audio_io.seek(0)
-                
-            return audio_io
+            for chunk in chunks:
+                communicate = edge_tts.Communicate(chunk, voice, rate=rate, pitch=pitch)
+                async for audio_chunk in communicate.stream():
+                    if audio_chunk["type"] == "audio":
+                        yield audio_chunk["data"]
         except Exception as e:
-            logger.error(f"Error in Silero TTS synthesize: {e}")
-            raise RuntimeError(f"Error generando audio: {str(e)}")
+            logger.error(f"Error in synthesize ({voice}): {e}")
+            raise RuntimeError(f"Error generando audio con {voice}: {str(e)}")
 
-    @classmethod
-    async def list_voices(cls) -> list[dict]:
-        """Returns Silero default voices."""
-        return [
-            {
-                "short_name": "es_0",
-                "friendly_name": "Silero Voz 1 (Masculina)",
-                "locale": "es-ES",
-                "language": "es",
-                "gender": "Male"
-            },
-            {
-                "short_name": "es_1",
-                "friendly_name": "Silero Voz 2 (Femenina)",
-                "locale": "es-ES",
-                "language": "es",
-                "gender": "Female"
-            },
-            {
-                "short_name": "es_2",
-                "friendly_name": "Silero Voz 3 (Femenina Alt)",
-                "locale": "es-ES",
-                "language": "es",
-                "gender": "Female"
-            }
-        ]
+    @staticmethod
+    async def list_voices() -> list[dict]:
+        return ALL_VOICES

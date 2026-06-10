@@ -4,14 +4,28 @@ from pydantic import BaseModel
 from app.services.pdf_service import PdfService, is_toc_page, TOC_ENTRY_PATTERN, TOC_HEADING_KEYWORDS
 from app.services.tts_service import TTSService
 from app.models.schemas import PdfProcessResponse, ErrorResponse, SaveAnnotationsRequest
+from io import BytesIO
 import traceback
+import logging
 import fitz
+import functools
 import os
 import time
 import json
 
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+logger = logging.getLogger(__name__)
+
+UPLOAD_DIR = os.path.realpath(os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads"))
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+def _safe_filepath(filename: str, suffix: str = "") -> str | None:
+    """Resolve a filename inside UPLOAD_DIR safely, preventing path traversal.
+    Returns the resolved path if valid, or None if the path escapes UPLOAD_DIR."""
+    candidate = os.path.realpath(os.path.join(UPLOAD_DIR, filename + suffix))
+    if not candidate.startswith(UPLOAD_DIR + os.sep):
+        return None
+    return candidate
 
 class SynthesizeRequest(BaseModel):
     text: str
@@ -24,10 +38,10 @@ router = APIRouter()
 
 @router.post("/upload", response_model=PdfProcessResponse)
 async def upload_pdf(file: UploadFile = File(...)):
-    if not file.filename.endswith('.pdf'):
+    if not (file.filename.lower().endswith('.pdf') or file.filename.lower().endswith('.epub')):
         return JSONResponse(
             status_code=400,
-            content=ErrorResponse(success=False, error="El archivo debe ser un PDF").model_dump()
+            content=ErrorResponse(success=False, error="El archivo debe ser un PDF o EPUB").model_dump()
         )
     try:
         content = await file.read()
@@ -38,14 +52,15 @@ async def upload_pdf(file: UploadFile = File(...)):
         with open(file_path, "wb") as f:
             f.write(content)
 
-        response_data = PdfService.extract_content(content)
+        filetype = "epub" if file.filename.lower().endswith('.epub') else "pdf"
+        response_data = PdfService.extract_content(content, filetype=filetype)
         response_data.metadata.filename = safe_filename
         return response_data
     except Exception as e:
-        error_msg = f"Error interno: {str(e)}\n{traceback.format_exc()}"
+        logger.error("Upload failed: %s", traceback.format_exc())
         return JSONResponse(
             status_code=500,
-            content=ErrorResponse(success=False, error=error_msg).model_dump()
+            content=ErrorResponse(success=False, error="Error interno al procesar el archivo.").model_dump()
         )
 
 
@@ -105,19 +120,35 @@ async def debug_pdf(file: UploadFile = File(...)):
 @router.post("/synthesize")
 async def synthesize_text(request: SynthesizeRequest):
     try:
-        audio_io = await TTSService.synthesize(
+        generator = TTSService.synthesize(
             text=request.text,
             voice=request.voice,
             rate=request.rate,
             pitch=request.pitch,
         )
-        return StreamingResponse(audio_io, media_type="audio/wav")
+        return StreamingResponse(generator, media_type="audio/mpeg")
     except Exception as e:
         error_msg = f"Error TTS: {str(e)}"
         return JSONResponse(
             status_code=500,
             content=ErrorResponse(success=False, error=error_msg).model_dump()
         )
+
+@router.get("/tts-status")
+async def tts_status():
+    try:
+        return {
+            "success": True,
+            "status": "ready",
+            "device": "cloud"
+        }
+    except Exception as e:
+        return {
+            "success": True,
+            "status": "error",
+            "error": str(e),
+            "device": "unknown"
+        }
 
 @router.get("/voices")
 async def list_voices():
@@ -134,7 +165,7 @@ async def list_voices():
 async def get_history():
     files = []
     for filename in os.listdir(UPLOAD_DIR):
-        if filename.endswith(".pdf"):
+        if filename.lower().endswith(".pdf") or filename.lower().endswith(".epub"):
             filepath = os.path.join(UPLOAD_DIR, filename)
             stats = os.stat(filepath)
             original_name = filename.split("_", 1)[-1] if "_" in filename else filename
@@ -149,8 +180,8 @@ async def get_history():
 
 @router.get("/history/{filename}", response_model=PdfProcessResponse)
 async def load_history_pdf(filename: str):
-    file_path = os.path.join(UPLOAD_DIR, filename)
-    if not os.path.exists(file_path) or not file_path.startswith(UPLOAD_DIR):
+    file_path = _safe_filepath(filename)
+    if not file_path or not os.path.exists(file_path):
         return JSONResponse(
             status_code=404,
             content=ErrorResponse(success=False, error="Archivo no encontrado").model_dump()
@@ -159,22 +190,24 @@ async def load_history_pdf(filename: str):
     try:
         with open(file_path, "rb") as f:
             content = f.read()
-        response_data = PdfService.extract_content(content)
+        
+        filetype = "epub" if filename.lower().endswith('.epub') else "pdf"
+        response_data = PdfService.extract_content(content, filetype=filetype)
         response_data.metadata.filename = filename
         return response_data
     except Exception as e:
-        error_msg = f"Error interno: {str(e)}\n{traceback.format_exc()}"
+        logger.error("History load failed for %s: %s", filename, traceback.format_exc())
         return JSONResponse(
             status_code=500,
-            content=ErrorResponse(success=False, error=error_msg).model_dump()
+            content=ErrorResponse(success=False, error="Error interno al cargar el archivo.").model_dump()
         )
 
 
 @router.get("/raw-pdf/{filename}")
 async def get_raw_pdf(filename: str):
     """Serves the raw, unmodified PDF file."""
-    file_path = os.path.join(UPLOAD_DIR, filename)
-    if not os.path.exists(file_path) or not file_path.startswith(UPLOAD_DIR):
+    file_path = _safe_filepath(filename)
+    if not file_path or not os.path.exists(file_path):
         return JSONResponse(
             status_code=404,
             content=ErrorResponse(success=False, error="Archivo no encontrado").model_dump()
@@ -182,48 +215,47 @@ async def get_raw_pdf(filename: str):
     return FileResponse(file_path, media_type="application/pdf")
 
 
+@functools.lru_cache(maxsize=30)
+def _render_page_cached(file_path: str, page_number: int) -> bytes | str:
+    """Renders a PDF page to a PNG and caches the bytes. Returns error message if failed."""
+    try:
+        doc = fitz.open(file_path)
+        if page_number < 1 or page_number > len(doc):
+            doc.close()
+            return f"Página fuera de rango (1-{len(doc)})"
+            
+        page = doc[page_number - 1]
+        pix = page.get_pixmap(dpi=150)
+        img_data = pix.tobytes("png")
+        doc.close()
+        return img_data
+    except Exception as e:
+        return f"Error renderizando página: {str(e)}"
+
 @router.get("/page-image/{filename}/{page_number}")
 async def get_page_image(filename: str, page_number: int):
-    """Renders a PDF page to an image and returns it."""
-    file_path = os.path.join(UPLOAD_DIR, filename)
-    if not os.path.exists(file_path) or not file_path.startswith(UPLOAD_DIR):
+    """Renders a PDF page to an image and returns it (cached)."""
+    file_path = _safe_filepath(filename)
+    if not file_path or not os.path.exists(file_path):
         return JSONResponse(
             status_code=404,
             content=ErrorResponse(success=False, error="Archivo no encontrado").model_dump()
         )
-    try:
-        # Open PDF
-        doc = fitz.open(file_path)
-        
-        # Check page_number range (1-indexed)
-        if page_number < 1 or page_number > len(doc):
-            doc.close()
-            return JSONResponse(
-                status_code=400,
-                content=ErrorResponse(success=False, error=f"Página fuera de rango (1-{len(doc)})").model_dump()
-            )
-            
-        page = doc[page_number - 1]
-        
-        # Render page to high quality image (DPI=150)
-        pix = page.get_pixmap(dpi=150)
-        img_data = pix.tobytes("png")
-        
-        doc.close()
-        
-        from io import BytesIO
-        return StreamingResponse(BytesIO(img_data), media_type="image/png")
-    except Exception as e:
-        error_msg = f"Error renderizando página: {str(e)}"
+    
+    result = _render_page_cached(file_path, page_number)
+    
+    if isinstance(result, str):
         return JSONResponse(
-            status_code=500,
-            content=ErrorResponse(success=False, error=error_msg).model_dump()
+            status_code=400 if "fuera de rango" in result else 500,
+            content=ErrorResponse(success=False, error=result).model_dump()
         )
+        
+    return StreamingResponse(BytesIO(result), media_type="image/png")
 
 @router.get("/annotations/{filename}")
 async def get_annotations(filename: str):
-    file_path = os.path.join(UPLOAD_DIR, f"{filename}_annotations.json")
-    if not os.path.exists(file_path) or not file_path.startswith(UPLOAD_DIR):
+    file_path = _safe_filepath(filename, suffix="_annotations.json")
+    if not file_path or not os.path.exists(file_path):
         return {"success": True, "annotations": []}
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -237,8 +269,8 @@ async def get_annotations(filename: str):
 
 @router.post("/annotations/{filename}")
 async def save_annotations(filename: str, request: SaveAnnotationsRequest):
-    file_path = os.path.join(UPLOAD_DIR, f"{filename}_annotations.json")
-    if not file_path.startswith(UPLOAD_DIR):
+    file_path = _safe_filepath(filename, suffix="_annotations.json")
+    if not file_path:
         return JSONResponse(status_code=400, content=ErrorResponse(success=False, error="Ruta inválida").model_dump())
     try:
         with open(file_path, "w", encoding="utf-8") as f:

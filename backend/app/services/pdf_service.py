@@ -1,9 +1,12 @@
 import fitz
 import base64
 import re
+import logging
 import unicodedata
 from app.models.schemas import PdfProcessResponse, PdfMetadata, ContentBlock, TocEntry
 from typing import List, Dict, Tuple, Optional
+
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────
 # TEXT UTILITIES
@@ -65,8 +68,9 @@ def is_toc_page(page: fitz.Page) -> bool:
 
 class PdfService:
     @staticmethod
-    def extract_content(pdf_bytes: bytes) -> PdfProcessResponse:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    def extract_content(file_bytes: bytes, filetype: str = "pdf") -> PdfProcessResponse:
+        logger.info("Extracting content (filetype=%s, size=%d bytes)", filetype, len(file_bytes))
+        doc = fitz.open(stream=file_bytes, filetype=filetype)
 
         # ── 1. Native PDF bookmarks ───────────────────────────────
         native_toc_raw = doc.get_toc()
@@ -111,15 +115,23 @@ class PdfService:
                     block_text = ""
                     block_max_size = 0.0
                     is_bold = False
+                    words = []
 
                     for line in block["lines"]:
                         for span in line["spans"]:
-                            block_text += span["text"] + " "
+                            t = span["text"]
+                            block_text += t + " "
                             if span["size"] > block_max_size:
                                 block_max_size = span["size"]
                             font = span["font"].lower()
                             if "bold" in font or "black" in font or (span["flags"] & 16):
                                 is_bold = True
+                            if t.strip():
+                                words.append({
+                                    "text": t.strip(),
+                                    "bbox": [span["bbox"][0], span["bbox"][1], span["bbox"][2], span["bbox"][3]],
+                                    "size": span["size"],
+                                })
 
                     block_text = block_text.strip()
                     if not block_text:
@@ -143,6 +155,7 @@ class PdfService:
                         "bbox": [block["bbox"][0], block["bbox"][1], block["bbox"][2], block["bbox"][3]],
                         "page_width": page.rect.width,
                         "page_height": page.rect.height,
+                        "words": words,
                     })
 
                 elif block["type"] == 1:
@@ -158,31 +171,18 @@ class PdfService:
                         })
 
         total_pages = len(doc)
-        doc.close()
 
-        # ── 4. Duplicate-heading detection ────────────────────────
-        # Strategy:
-        #   a) If native bookmarks exist → use them + mark nothing as is_toc
-        #   b) Otherwise:
-        #      - Find all heading text → group by normalized form
-        #      - For groups with ≥ 2 occurrences, the FIRST is a TOC entry
-        #        (provided it appears in the first ~20% of pages)
-        #      - Mark those blocks as is_toc=True
-        #      - Also mark whole TOC pages (pages containing TOC keyword)
-
+        # ── 4. Detect TOC pages (keyword-based) ──────────────────
         toc_page_set: set = set()
-        for i, rb in enumerate(raw_blocks):
-            if rb["type"] == "img":
-                continue
-            pg = rb["page"] - 1
-            # detect toc-keyword pages lazily
-            # We'll check by scanning the document for keyword pages
-        # Re-scan for TOC page indices
-        doc2 = fitz.open(stream=pdf_bytes, filetype="pdf")
-        for page_num, page in enumerate(doc2):
-            if is_toc_page(page):
-                toc_page_set.add(page_num + 1)  # 1-indexed pages
-        doc2.close()
+        for page_num_scan in range(len(doc)):
+            if is_toc_page(doc[page_num_scan]):
+                toc_page_set.add(page_num_scan + 1)  # 1-indexed
+
+        doc.close()
+        logger.info("Extracted %d blocks from %d pages (toc_pages=%s, native_toc=%d entries)",
+                    len(raw_blocks), total_pages, toc_page_set or "none", len(native_toc_raw))
+
+
 
         if has_native_toc:
             # Use native bookmarks; mark is_toc for pages in toc_page_set
@@ -208,7 +208,11 @@ class PdfService:
                         score = len(min(nkey, nh, key=len)) / len(max(nkey, nh, key=len))
                         if score > best_score:
                             best_score, best_idx = score, blk_i
-                entry.block_index = best_idx if (best_idx is not None and (best_idx == best_idx or best_score >= 0.5)) else None
+                if best_idx is not None and (best_score >= 0.5 or best_score == 0.0):
+                    # best_score == 0.0 means exact match (broke out of loop early)
+                    entry.block_index = best_idx
+                else:
+                    entry.block_index = None
 
             structured_content = [
                 ContentBlock(
@@ -219,6 +223,7 @@ class PdfService:
                     bbox=rb.get("bbox"),
                     page_width=rb.get("page_width"),
                     page_height=rb.get("page_height"),
+                    words=rb.get("words", []),
                 )
                 for rb in raw_blocks
             ]
@@ -296,6 +301,7 @@ class PdfService:
                 bbox=rb.get("bbox"),
                 page_width=rb.get("page_width"),
                 page_height=rb.get("page_height"),
+                words=rb.get("words", []),
             )
             for i, rb in enumerate(raw_blocks)
         ]

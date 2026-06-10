@@ -8,30 +8,9 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 ## Project Overview
 
-**PDFVoice** is a local-first web application that converts PDF documents to speech using AI Text-to-Speech. It runs entirely on the user's machine (GPU if available, CPU fallback) for maximum privacy.
+**PDFVoice** is a local-first web application for **AI-powered studying**: it converts PDF documents to speech, offers text-to-speech playback with block-level navigation, and provides **annotation tools** (highlighting, notes, bookmarking) to help students and researchers study documents more effectively. Everything runs on the user's machine (GPU if available, CPU fallback) for maximum privacy.
 
-### Architecture
 
-```
-PDF TO SPEECH/
-├── src/app/              ← Next.js 16 frontend (React 19, Tailwind CSS v4)
-│   ├── globals.css       ← Design system (uses @import "tailwindcss" + @theme, NOT @tailwind directives)
-│   ├── layout.tsx        ← Root layout
-│   └── page.tsx          ← Main app component (single-page app)
-├── backend/              ← Python FastAPI backend
-│   └── app/
-│       ├── main.py       ← FastAPI entrypoint (CORS, router mount)
-│       ├── api/
-│       │   └── endpoints.py  ← All API routes (/upload, /synthesize, /tts-status, /history)
-│       ├── services/
-│       │   ├── pdf_service.py    ← PDF text extraction (PyMuPDF/fitz)
-│       │   └── tts_service.py    ← Local AI TTS engine (SpeechT5 + HiFiGAN, GPU/CPU)
-│       ├── models/
-│       │   └── schemas.py        ← Pydantic response schemas
-│       └── uploads/              ← Persistent PDF storage (auto-created)
-├── postcss.config.mjs    ← PostCSS config (uses @tailwindcss/postcss, NOT tailwindcss)
-└── package.json          ← Node dependencies
-```
 
 ## Critical Rules
 

@@ -48,3 +48,6 @@ backend/app/uploads/
 *.pyc
 *.pyo
 *.pyd
+*.wav
+backend/app/models/piper/
+backend/test_tts.py

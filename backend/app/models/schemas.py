@@ -1,6 +1,11 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
+class WordPosition(BaseModel):
+    text: str = Field(..., description="Texto del fragmento")
+    bbox: List[float] = Field(..., description="Coordenadas: [x0, y0, x1, y1]")
+    size: float = Field(0.0, description="Tamaño de fuente")
+
 class TocEntry(BaseModel):
     level: int = Field(..., description="Nivel de profundidad: 1=h1, 2=h2, 3=h3")
     title: str = Field(..., description="Texto del título")
@@ -16,6 +21,7 @@ class ContentBlock(BaseModel):
     bbox: Optional[List[float]] = Field(None, description="Coordenadas del bloque: [x0, y0, x1, y1]")
     page_width: Optional[float] = Field(None, description="Ancho de la página de origen")
     page_height: Optional[float] = Field(None, description="Alto de la página de origen")
+    words: List[WordPosition] = Field(default_factory=list, description="Fragmentos del bloque con sus coordenadas")
 
 class PdfMetadata(BaseModel):
     base_size: float = Field(..., description="Tamaño de letra base del documento")
