@@ -51,3 +51,5 @@ backend/app/uploads/
 *.wav
 backend/app/models/piper/
 backend/test_tts.py
+backend/app/cache/
+*.mp3
