@@ -1,9 +1,14 @@
 import io
 import logging
 import re
+import os
+import hashlib
 import edge_tts
 
 logger = logging.getLogger(__name__)
+
+CACHE_DIR = os.path.realpath(os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache", "audio"))
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 EDGE_VOICES_CONFIG = {
     "es-ES-ElviraNeural": {
@@ -126,7 +131,26 @@ class TTSService:
 
         clean_text = text.strip().replace("\n", " ")
         
-        # Split text into chunks if it exceeds the Edge TTS limit (~2000 chars)
+        # 1. Generate MD5 Hash for caching
+        hash_str = f"{clean_text}_{voice}_{rate}_{pitch}"
+        audio_hash = hashlib.md5(hash_str.encode("utf-8")).hexdigest()
+        cache_filepath = os.path.join(CACHE_DIR, f"{audio_hash}.mp3")
+
+        # 2. If cached, stream from disk
+        if os.path.exists(cache_filepath):
+            logger.info("Cache hit for TTS audio: %s", audio_hash)
+            try:
+                with open(cache_filepath, "rb") as f:
+                    while chunk := f.read(65536):  # 64KB chunks
+                        yield chunk
+                return
+            except Exception as e:
+                logger.error("Error reading from TTS cache: %s", e)
+                # Fallback to re-generating if read fails
+
+        logger.info("Cache miss for TTS audio, generating new: %s", audio_hash)
+
+        # 3. Split text into chunks if it exceeds the Edge TTS limit (~2000 chars)
         chunks = []
         if len(clean_text) <= 2000:
             chunks = [clean_text]
@@ -150,13 +174,20 @@ class TTSService:
                 chunks.append(current_chunk.strip())
 
         try:
-            for chunk in chunks:
-                communicate = edge_tts.Communicate(chunk, voice, rate=rate, pitch=pitch)
-                async for audio_chunk in communicate.stream():
-                    if audio_chunk["type"] == "audio":
-                        yield audio_chunk["data"]
+            # Open file to save while streaming
+            with open(cache_filepath, "wb") as f:
+                for chunk in chunks:
+                    communicate = edge_tts.Communicate(chunk, voice, rate=rate, pitch=pitch)
+                    async for audio_chunk in communicate.stream():
+                        if audio_chunk["type"] == "audio":
+                            data = audio_chunk["data"]
+                            f.write(data)
+                            yield data
         except Exception as e:
             logger.error(f"Error in synthesize ({voice}): {e}")
+            # If generation fails halfway, delete the corrupt cache file
+            if os.path.exists(cache_filepath):
+                os.remove(cache_filepath)
             raise RuntimeError(f"Error generando audio con {voice}: {str(e)}")
 
     @staticmethod

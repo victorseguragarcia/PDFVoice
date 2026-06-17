@@ -28,10 +28,10 @@ This project uses **Tailwind CSS v4**, which is fundamentally different from v3:
 
 - The backend runs in a **virtual environment** at `backend/venv/`.
 - Always use `.\venv\Scripts\pip` for installing Python packages, never `npm install`.
-- The TTS service is a **singleton** — use `TTSService.get_instance()`, never instantiate directly.
-- The TTS model (SpeechT5) has a **~600 token input limit**. Text must be truncated before synthesis.
-- The HiFiGAN vocoder requires `ignore_mismatched_sizes=True` when loading.
-- GPU detection is automatic via `torch.cuda.is_available()`.
+- The TTS service uses **Microsoft Edge TTS** (cloud-based) to provide high-quality voices.
+- Long text blocks (>2000 chars) are automatically chunked and streamed as async generators for ultra-fast Time-To-First-Byte (TTFB).
+- Generated audio is cached to disk using an MD5 hash of its parameters to ensure instant replays and save bandwidth.
+- GPUs are not required since the TTS runs in the cloud.
 - PDFs are saved to `backend/app/uploads/` with a `{timestamp}_{filename}` naming convention.
 
 ### Frontend (Next.js 16 + React 19)
@@ -75,4 +75,4 @@ cd backend
 uvicorn app.main:app --reload
 ```
 
-> The first TTS request will download model weights (~1–2 GB). Subsequent starts load from cache.
+> The backend uses Edge TTS. It requires an active internet connection to generate new audio, but previously generated blocks are cached locally for offline replay.

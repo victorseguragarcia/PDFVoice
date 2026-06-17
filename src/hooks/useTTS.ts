@@ -20,11 +20,24 @@ export function useTTS() {
   const [isAudioLoading, setIsAudioLoading] = useState(false);
   const [ttsError, setTtsError] = useState("");
   const [engineStatus, setEngineStatus] = useState<TTSStatus | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const activeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioPoolRef = useRef<HTMLAudioElement[]>([]);
   const generationIdRef = useRef(0);
   const isPlayingRef = useRef(false);
 
   const urlCacheRef = useRef<Map<string, string>>(new Map());
+
+  useEffect(() => {
+    // Inicializar pool de Audio para reproducción sin pausas
+    audioPoolRef.current = [new Audio(), new Audio(), new Audio()];
+    return () => {
+      audioPoolRef.current.forEach(a => {
+        a.pause();
+        a.removeAttribute("src");
+        a.load();
+      });
+    };
+  }, []);
   const promiseCacheRef = useRef<Map<string, Promise<string>>>(new Map());
 
   // Clean up cached audio URLs when voice parameters change to prevent memory leaks
@@ -110,8 +123,8 @@ export function useTTS() {
 
       urlCacheRef.current.set(cacheKey, url);
 
-      // Limpiar caché antigua (límite de 5)
-      if (urlCacheRef.current.size > 5) {
+      // Limpiar caché antigua (límite de 15)
+      if (urlCacheRef.current.size > 15) {
         const firstKey = urlCacheRef.current.keys().next().value;
         if (firstKey) {
           const oldUrl = urlCacheRef.current.get(firstKey);
@@ -129,7 +142,14 @@ export function useTTS() {
   }, [selectedVoice, speechRate, pitch]);
 
   const prefetch = useCallback((text: string) => {
-    getAudioUrl(text).catch(() => {});
+    getAudioUrl(text).then(url => {
+      if (audioPoolRef.current.some(a => a.src === url)) return;
+      const idleAudio = audioPoolRef.current.find(a => 
+         a !== activeAudioRef.current && (a.paused || a.ended || !a.src)
+      ) || audioPoolRef.current[0];
+      idleAudio.src = url;
+      idleAudio.load();
+    }).catch(() => {});
   }, [getAudioUrl]);
 
   const speak = useCallback(
@@ -152,16 +172,27 @@ export function useTTS() {
           return; // Aborted
         }
 
-        if (audioRef.current) {
-          audioRef.current.src = url;
-          audioRef.current.onended = () => onEnd?.();
-          if (isPlayingRef.current) {
-            try {
-              await audioRef.current.play();
-            } catch (playErr) {
-              if (playErr instanceof Error && playErr.name !== "AbortError") {
-                console.error("Error reproduciendo audio:", playErr);
-              }
+        if (activeAudioRef.current && activeAudioRef.current.src !== url) {
+           activeAudioRef.current.pause();
+        }
+
+        let audioToPlay = audioPoolRef.current.find(a => a.src === url);
+        if (!audioToPlay) {
+           audioToPlay = audioPoolRef.current.find(a => a !== activeAudioRef.current) || audioPoolRef.current[0];
+           audioToPlay.src = url;
+           audioToPlay.load();
+        }
+
+        activeAudioRef.current = audioToPlay;
+        try { audioToPlay.currentTime = 0; } catch (e) {}
+        audioToPlay.onended = () => onEnd?.();
+
+        if (isPlayingRef.current) {
+          try {
+            await audioToPlay.play();
+          } catch (playErr) {
+            if (playErr instanceof Error && playErr.name !== "AbortError") {
+              console.error("Error reproduciendo audio:", playErr);
             }
           }
         }
@@ -183,22 +214,21 @@ export function useTTS() {
     generationIdRef.current++;
     isPlayingRef.current = false;
     setIsAudioLoading(false);
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.removeAttribute("src");
-      audioRef.current.load();
-    }
+    audioPoolRef.current.forEach(a => {
+      a.pause();
+      try { a.currentTime = 0; } catch(e){}
+    });
   }, []);
 
   const pause = useCallback(() => {
     isPlayingRef.current = false;
-    audioRef.current?.pause();
+    activeAudioRef.current?.pause();
   }, []);
 
   const resume = useCallback(() => {
     isPlayingRef.current = true;
-    if (audioRef.current && audioRef.current.hasAttribute("src")) {
-      audioRef.current.play().catch((err) => {
+    if (activeAudioRef.current && activeAudioRef.current.src) {
+      activeAudioRef.current.play().catch((err) => {
         if (err.name !== "AbortError") {
           console.error("Error al reanudar audio:", err);
         }
@@ -218,7 +248,7 @@ export function useTTS() {
     setTtsError,
     engineStatus,
     isAudioLoading,
-    audioRef,
+    audioRef: activeAudioRef,
     speak,
     stop,
     pause,

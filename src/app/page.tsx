@@ -15,6 +15,8 @@ import { SettingsDrawer } from "@/components/SettingsDrawer";
 import { PlayerControls } from "@/components/PlayerControls";
 import { BionicText } from "@/components/BionicText";
 import { TopBar } from "@/components/TopBar";
+import { AnnotationToolbar } from "@/components/AnnotationToolbar";
+import { PDFViewer } from "@/components/PDFViewer";
 import { UploadScreen } from "@/components/UploadScreen";
 import { useHistory } from "@/hooks/useHistory";
 import { useTTS } from "@/hooks/useTTS";
@@ -350,6 +352,13 @@ export default function Home() {
 
     document.getElementById(`block-${index}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
 
+    // Pre-fetch upcoming blocks BEFORE waiting for speak so they load concurrently
+    for (let i = 1; i <= 3; i++) {
+      if (index + i < blocks.length) {
+        tts.prefetch(blocks[index + i].content);
+      }
+    }
+
     await tts.speak(text, () => {
       // Auto-advance
       if (index < blocks.length - 1) fetchAudioInner(index + 1);
@@ -358,11 +367,6 @@ export default function Home() {
         tts.stop();
       }
     });
-
-    // Prefetch the next block's audio while this one is playing
-    if (index < blocks.length - 1) {
-      tts.prefetch(blocks[index + 1].content);
-    }
   }, [blocks, tts]);
 
   const togglePlayPause = useCallback(() => {
@@ -371,7 +375,7 @@ export default function Home() {
       setIsPlaying(false);
     } else {
       setIsPlaying(true);
-      if (tts.audioRef.current?.hasAttribute("src") && !tts.audioRef.current.ended) {
+      if (tts.audioRef.current?.src && !tts.audioRef.current.ended) {
         tts.resume();
       } else {
         fetchAudio(currentBlockIndex);
@@ -409,6 +413,15 @@ export default function Home() {
       } else if (e.code === "ArrowLeft") {
         e.preventDefault();
         handlePrevBlock();
+      } else if (e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setFullscreen(prev => !prev);
+      } else if (e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setBionicReading(prev => !prev);
+      } else if (e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        setShowSettings(prev => !prev);
       }
     };
     
@@ -509,234 +522,45 @@ export default function Home() {
         ) : (
           <>
             {!readerMode && (
-              <div className={`shrink-0 px-4 md:px-8 pt-4 md:pt-8 ${wideMode ? "max-w-full" : "max-w-4xl"} mx-auto w-full ${fullscreen ? "hidden" : ""}`}>
-              <div className="flex items-center justify-between p-2 rounded-2xl bg-zinc-900/80 backdrop-blur-xl border border-white/10 shadow-lg z-40 relative">
-                <div className="flex items-center gap-1">
-                  <button onClick={() => setCurrentTool("select")} className={`p-2.5 rounded-xl transition-all cursor-pointer ${currentTool === "select" ? "bg-primary text-white shadow-md" : "text-muted-foreground hover:bg-white/10 hover:text-foreground"}`}>
-                    <MousePointer2 className="w-5 h-5" />
-                  </button>
-                  <div className="w-px h-6 bg-white/10 mx-1" />
-                  <button onClick={() => { setCurrentTool("draw"); setAnnotationColor(DEFAULT_TOOL_COLORS.draw); setStrokeWidth(2); setStrokeOpacity(0.9); }} className={`p-2.5 rounded-xl transition-all cursor-pointer ${currentTool === "draw" ? "bg-accent text-white shadow-md" : "text-muted-foreground hover:bg-white/10 hover:text-foreground"}`}>
-                    <PenTool className="w-5 h-5" />
-                  </button>
-                  <button onClick={() => { setCurrentTool("highlight"); setAnnotationColor(DEFAULT_TOOL_COLORS.highlight); setStrokeWidth(6); setStrokeOpacity(0.3); }} className={`p-2.5 rounded-xl transition-all cursor-pointer ${currentTool === "highlight" ? "bg-yellow-500 text-white shadow-md" : "text-muted-foreground hover:bg-white/10 hover:text-foreground"}`}>
-                    <Highlighter className="w-5 h-5" />
-                  </button>
-                  <button onClick={() => { setCurrentTool("note"); setAnnotationColor(DEFAULT_TOOL_COLORS.note); }} className={`p-2.5 rounded-xl transition-all cursor-pointer ${currentTool === "note" ? "bg-blue-500 text-white shadow-md" : "text-muted-foreground hover:bg-white/10 hover:text-foreground"}`}>
-                    <StickyNote className="w-5 h-5" />
-                  </button>
-                  <div className="w-px h-6 bg-white/10 mx-1" />
-                  <button onClick={() => setCurrentTool("eraser")} className={`p-2.5 rounded-xl transition-all cursor-pointer ${currentTool === "eraser" ? "bg-red-500 text-white shadow-md" : "text-muted-foreground hover:bg-white/10 hover:text-foreground"}`}>
-                    <Trash2 className="w-5 h-5" />
-                  </button>
-                  <div className="w-px h-6 bg-white/10 mx-1" />
-                  <button onClick={() => { setCurrentTool("text_highlight"); setAnnotationColor(DEFAULT_TOOL_COLORS.highlight); setStrokeWidth(6); setStrokeOpacity(0.3); }} className={`p-2.5 rounded-xl transition-all cursor-pointer ${currentTool === "text_highlight" ? "bg-yellow-500 text-white shadow-md" : "text-muted-foreground hover:bg-white/10 hover:text-foreground"}`}>
-                    <Type className="w-5 h-5" />
-                  </button>
-                </div>
-                {(currentTool === "draw" || currentTool === "highlight" || currentTool === "text_highlight") && (
-                  <div className="flex items-center gap-2 px-2 py-1.5 mx-1 rounded-xl bg-white/[0.03] border border-white/5">
-                    <div className="flex items-center gap-1">
-                      {ANNOTATION_COLORS.map((c) => (
-                        <button
-                          key={c}
-                          onClick={() => setAnnotationColor(c)}
-                          className={`w-4 h-4 rounded-full transition-all cursor-pointer ${annotationColor === c ? "ring-2 ring-white ring-offset-1 ring-offset-zinc-900 scale-125" : "hover:scale-110"}`}
-                          style={{ backgroundColor: c }}
-                        />
-                      ))}
-                    </div>
-                    <div className="w-px h-5 bg-white/10" />
-                    <div className="flex items-center gap-1">
-                      {[
-                        { label: "1", w: 1 },
-                        { label: "2", w: 2 },
-                        { label: "4", w: 4 },
-                        { label: "6", w: 6 },
-                        { label: "8", w: 8 },
-                      ].map(({ label, w }) => (
-                        <button
-                          key={w}
-                          onClick={() => setStrokeWidth(w)}
-                          className={`px-1.5 py-0.5 text-[10px] font-medium rounded-md transition-all cursor-pointer ${strokeWidth === w ? "bg-primary/20 text-primary" : "text-muted-foreground hover:bg-white/10 hover:text-foreground"}`}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="w-px h-5 bg-white/10" />
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-[10px] text-muted-foreground/60">Op</span>
-                      <input
-                        type="range"
-                        min="0.1"
-                        max="1"
-                        step="0.1"
-                        value={strokeOpacity}
-                        onChange={(e) => setStrokeOpacity(parseFloat(e.target.value))}
-                        className="w-16 h-1 accent-primary cursor-pointer"
-                      />
-                      <span className="text-[10px] text-muted-foreground/60 w-4">{Math.round(strokeOpacity * 100)}%</span>
-                    </div>
-                  </div>
-                )}
-
-                <div className="flex items-center gap-3 pr-2">
-                  {isSavingAnnotations && (
-                    <span className="text-xs text-muted-foreground animate-pulse flex items-center gap-1.5">
-                      <div className="w-1.5 h-1.5 rounded-full bg-primary" /> Guardando...
-                    </span>
-                  )}
-                  <button onClick={() => setShowPdf(!showPdf)} className={`p-2 rounded-xl transition-all cursor-pointer ${showPdf ? "bg-white/10 text-foreground" : "text-muted-foreground hover:bg-white/10 hover:text-foreground"}`} title="Ver PDF">
-                    <FileText className="w-4 h-4" />
-                  </button>
-                  <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground bg-white/5 px-3 py-1.5 rounded-lg">
-                    <Eye className="w-4 h-4" />
-                    <span>{annotations.length} anotaciones</span>
-                  </div>
-                </div>
-              </div>
-            </div>
+              <AnnotationToolbar
+                currentTool={currentTool}
+                setCurrentTool={setCurrentTool}
+                annotationColor={annotationColor}
+                setAnnotationColor={setAnnotationColor}
+                strokeWidth={strokeWidth}
+                setStrokeWidth={setStrokeWidth}
+                strokeOpacity={strokeOpacity}
+                setStrokeOpacity={setStrokeOpacity}
+                isSavingAnnotations={isSavingAnnotations}
+                showPdf={showPdf}
+                setShowPdf={setShowPdf}
+                annotationsCount={annotations.length}
+                wideMode={wideMode}
+                fullscreen={fullscreen}
+              />
             )}
 
-            <div className={`flex-1 overflow-y-auto px-4 md:px-8 pb-32 animate-fade-in transition-all duration-500 ease-in-out scroll-smooth ${wideMode ? "max-w-full" : "max-w-4xl"} mx-auto w-full`}>
-              {readerMode ? (
-                <div className="space-y-6 pt-12 pb-24 text-lg leading-relaxed text-foreground/90 font-serif">
-                  {blocks.map((block, globalIndex) => {
-                    const isCurrent = currentBlockIndex === globalIndex;
-                    const isHeading = ["h1", "h2", "h3"].includes(block.type);
-                    
-                    return (
-                      <p
-                        key={globalIndex}
-                        id={`block-${globalIndex}`}
-                        onClick={() => goToBlock(globalIndex)}
-                        className={`cursor-pointer p-4 rounded-2xl transition-all duration-300 ${
-                          isCurrent ? "bg-primary/20 ring-1 ring-primary shadow-lg scale-[1.01]" : "hover:bg-white/[0.04]"
-                        } ${isHeading ? "font-bold text-2xl text-white mt-8 mb-4 font-sans" : ""}`}
-                      >
-                        {bionicReading ? <BionicText text={block.content} /> : block.content}
-                      </p>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="space-y-6 pt-8 relative">
-                {pageNumbers.map((pageInfo) => {
-                const pageBlocks = blocks.filter((b) => b.page === pageInfo);
-                const isCurrentPage = pageBlocks.some((b) => blocks.indexOf(b) === currentBlockIndex);
-                const firstBlock = pageBlocks[0];
-                const pageWidth = firstBlock?.page_width || 800;
-                const pageHeight = firstBlock?.page_height || 1100;
-
-                return (
-                  <div key={`page-${pageInfo}`} className={`relative rounded-3xl overflow-hidden transition-all duration-500 ${isCurrentPage ? "ring-1 ring-white/10 shadow-2xl" : ""}`}>
-
-                    {/* PDF image as main view */}
-                    <div className="relative w-full bg-white" style={{ aspectRatio: `${pageWidth}/${pageHeight}` }}>
-                      {serverFilename && (
-                        <img
-                          src={`${API_BASE}/page-image/${serverFilename}/${pageInfo}`}
-                          alt={`Página ${pageInfo}`}
-                          className="absolute inset-0 w-full h-full object-contain"
-                          draggable={false}
-                        />
-                      )}
-
-                    {/* Invisible clickable areas positioned via bbox */}
-                    <div className="absolute inset-0 z-10">
-                      {currentTool === "text_highlight"
-                        ? (() => {
-                            const allWordsOnPage = pageBlocks.flatMap((block) => {
-                              const globalIndex = blocks.indexOf(block);
-                              const words = block.words || [];
-                              return words.map((word, wIdx) => ({
-                                id: `${globalIndex}-${wIdx}`,
-                                bbox: word.bbox || [0, 0, 0, 0],
-                                text: word.text || "",
-                                page_width: block.page_width || 800,
-                                page_height: block.page_height || 1100,
-                              }));
-                            });
-
-                            return allWordsOnPage.map((word, flatIndex) => {
-                              const [x0, y0, x1, y1] = word.bbox;
-                              const left = (x0 / word.page_width) * 100;
-                              const top = (y0 / word.page_height) * 100;
-                              const width = ((x1 - x0) / word.page_width) * 100;
-                              const height = ((y1 - y0) / word.page_height) * 100;
-                              const isSelected = selectedWordIds.has(word.id);
-                              return (
-                                <div
-                                  key={word.id}
-                                  data-word-id={word.id}
-                                  onPointerDown={(e) => handleWordPointerDown(flatIndex, word.id, e)}
-                                  onPointerEnter={() => handleWordPointerEnter(flatIndex, word.id, allWordsOnPage)}
-                                  className={`absolute cursor-pointer transition-colors duration-150 ${isSelected ? "bg-yellow-400/30" : "hover:bg-white/[0.06]"}`}
-                                  style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%` }}
-                                  title={word.text}
-                                />
-                              );
-                            });
-                          })()
-                        : pageBlocks.map((block) => {
-                            const globalIndex = blocks.indexOf(block);
-                            const isCurrent = currentBlockIndex === globalIndex;
-
-                            if (block.bbox && block.page_width && block.page_height) {
-                              const left = (block.bbox[0] / block.page_width) * 100;
-                              const top = (block.bbox[1] / block.page_height) * 100;
-                              const width = ((block.bbox[2] - block.bbox[0]) / block.page_width) * 100;
-                              const height = ((block.bbox[3] - block.bbox[1]) / block.page_height) * 100;
-
-                              return (
-                                <div
-                                  key={globalIndex}
-                                  id={`block-${globalIndex}`}
-                                  onClick={() => goToBlock(globalIndex)}
-                                  className={`absolute cursor-pointer transition-colors duration-200 ${isCurrent ? "bg-primary/10 ring-1 ring-primary" : "hover:bg-white/[0.06]"}`}
-                                  style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%` }}
-                                  title={block.content}
-                                />
-                              );
-                            }
-
-                            return (
-                              <div
-                                key={globalIndex}
-                                id={`block-${globalIndex}`}
-                                onClick={() => goToBlock(globalIndex)}
-                                className={`cursor-pointer p-2 rounded transition-colors ${isCurrent ? "bg-primary/10" : "hover:bg-white/[0.06]"}`}
-                              >
-                                <p className="text-xs text-transparent">{block.content}</p>
-                              </div>
-                            );
-                          })
-                      }
-                    </div>
-
-                      <AnnotationOverlay
-                        pageNum={pageInfo}
-                        currentTool={currentTool}
-                        annotationColor={annotationColor}
-                        strokeWidth={strokeWidth}
-                        strokeOpacity={strokeOpacity}
-                        annotations={annotations}
-                        onAddAnnotation={handleAddAnnotation}
-                        onUpdateAnnotation={handleUpdateAnnotation}
-                        onDeleteAnnotation={handleDeleteAnnotation}
-                      />
-                    </div>
-
-                    <div className="absolute -left-3 top-8 flex items-center justify-center w-6 h-6 rounded-full bg-primary/20 text-primary text-[10px] font-bold ring-4 ring-[#09090b] z-20">
-                      {pageInfo}
-                    </div>
-                  </div>
-                );
-              })}
-              </div>
-            )}
-            </div>
+            <PDFViewer
+              readerMode={readerMode}
+              wideMode={wideMode}
+              blocks={blocks}
+              currentBlockIndex={currentBlockIndex}
+              goToBlock={goToBlock}
+              bionicReading={bionicReading}
+              pageNumbers={pageNumbers}
+              serverFilename={serverFilename}
+              currentTool={currentTool}
+              selectedWordIds={selectedWordIds}
+              handleWordPointerDown={handleWordPointerDown}
+              handleWordPointerEnter={handleWordPointerEnter}
+              annotationColor={annotationColor}
+              strokeWidth={strokeWidth}
+              strokeOpacity={strokeOpacity}
+              annotations={annotations}
+              handleAddAnnotation={handleAddAnnotation}
+              handleUpdateAnnotation={handleUpdateAnnotation}
+              handleDeleteAnnotation={handleDeleteAnnotation}
+            />
           </>
         )}
 
@@ -861,8 +685,6 @@ export default function Home() {
             </div>
           </>
         )}
-
-        <audio ref={tts.audioRef} className="hidden" />
       </main>
     </div>
   );
